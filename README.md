@@ -1,5 +1,11 @@
 # SillyTavern Omarchy Widget
 
+**Testing status: verified locally in Frankenstein KDE Plasma Wayland with the
+preserved Omarchy bar.** This is an experimental release. Normal Omarchy Hyprland,
+Frankenstein Hyprland, and the filtered KDE adapter have not been tested live.
+Their compatibility is based on the shared plugin interface and source inspection.
+See the [compatibility matrix](docs/COMPATIBILITY.md) for the exact coverage.
+
 A compact **RP AI Offline / Partial / Online / Error** bar widget and separate
 **RP AI ON** and **RP AI OFF** application launchers for a local llama.cpp server.
 SillyTavern remains an independent frontend. This project is not affiliated with

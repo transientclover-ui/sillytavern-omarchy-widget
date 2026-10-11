@@ -1,8 +1,12 @@
 # Compatibility matrix
 
+**KDE-tested, experimental:** only Frankenstein KDE Plasma Wayland with the
+preserved stock Omarchy shell has passed live runtime testing. Other targets
+remain proposed compatibility until tested in their own sessions.
+
 | Target | Controller and launchers | Widget | Verification |
 |---|---|---|---|
-| Frankenstein KDE Plasma Wayland, preserved stock Omarchy shell | Supported | Supported | Live user service and loaded widget tested on this machine |
+| Frankenstein KDE Plasma Wayland, preserved stock Omarchy shell | Verified locally | Verified locally | Live user service and loaded widget tested on this machine |
 | Normal Omarchy Hyprland | Designed to work | Same stock bar API; no compositor imports in widget | Not tested in a live Hyprland session |
 | Frankenstein Hyprland | Designed to work | Same stock bar API | Not tested in a live Hyprland session |
 | Frankenstein KDE filtered adapter with optional Omarchy bar | Designed to work | Third-party plugins are not restricted by its first-party allowlist | Adapter source inspected; not exercised live |

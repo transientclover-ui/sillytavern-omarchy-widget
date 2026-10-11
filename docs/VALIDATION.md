@@ -1,5 +1,8 @@
 # Local validation — 2026-10-11
 
+**Verified environment: Frankenstein KDE Plasma Wayland with the preserved Omarchy
+bar. This report does not establish live Hyprland or filtered-adapter support.**
+
 Tested on Arch Linux, KDE Plasma Wayland with the preserved Omarchy Quickshell
 bar and Frankenstein integration. AMD RX 5700, 8 GB VRAM, 16 GB system memory.
 
