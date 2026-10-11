@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""Manual llama.cpp service control and verified local readiness."""
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import socket
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+UNIT = 'rp-ai.service'
+CONFIG = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config')) / 'rp-ai/config.json'
+
+
+def config():
+    c = json.loads(CONFIG.read_text())
+    for key in ('binary', 'model'):
+        if not isinstance(c.get(key), str) or not c[key]:
+            raise ValueError(f'Configure {key} in {CONFIG}')
+        c[key] = str(Path(c[key]).expanduser().absolute())
+    if c.get('host', '127.0.0.1') != '127.0.0.1':
+        raise ValueError('Only loopback host 127.0.0.1 is supported')
+    c['port'] = int(c.get('port', 8080))
+    if not 1024 <= c['port'] <= 65535:
+        raise ValueError('port must be 1024..65535')
+    c['startup_timeout'] = float(c.get('startup_timeout', 300))
+    if c['startup_timeout'] <= 0:
+        raise ValueError('startup_timeout must be positive')
+    args = c.get('args', [])
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        raise ValueError('args must be an array of strings')
+    # Endpoint/model selection stays under this controller, not extra flags.
+    forbidden = {'-m', '--model', '--host', '--port', '-hf', '--hf-repo',
+                 '--models-dir', '--models-preset', '--sleep-idle-seconds'}
+    if any(a.split('=')[0] in forbidden or a.startswith(('-m', '-hf')) for a in args):
+        raise ValueError('args cannot override model, endpoint, router or sleep mode')
+    return c
+
+
+def systemctl(*args, check=True):
+    return subprocess.run(['systemctl', '--user', *args], text=True,
+                          capture_output=True, check=check, timeout=10)
+
+
+def properties():
+    r = systemctl('show', UNIT, '--property=LoadState,ActiveState,SubState,MainPID,Result,ActiveEnterTimestampMonotonic', check=False)
+    if r.returncode:
+        raise RuntimeError(r.stderr.strip() or 'User systemd unavailable')
+    return dict(line.split('=', 1) for line in r.stdout.splitlines() if '=' in line)
+
+
+def owns_listener(pid, port):
+    """A 200 response alone is insufficient: the service PID must own the socket."""
+    fds = set()
+    for fd in Path(f'/proc/{pid}/fd').iterdir():
+        try:
+            target = os.readlink(fd)
+            if target.startswith('socket:['):
+                fds.add(target[8:-1])
+        except OSError:
+            pass
+    for table in ('tcp', 'tcp6'):
+        for line in Path(f'/proc/{pid}/net/{table}').read_text().splitlines()[1:]:
+            fields = line.split()
+            if int(fields[1].split(':')[1], 16) == port and fields[3] == '0A' and fields[9] in fds:
+                return True
+    return False
+
+
+def probe(port):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f'http://127.0.0.1:{port}/health', timeout=1) as r:
+            return r.status, json.loads(r.read(8192))
+    except urllib.error.HTTPError as e:
+        return e.code, {}
+    except (OSError, ValueError):
+        return None, {}
+
+
+def classify(p, code, body, owned, elapsed, timeout):
+    if p.get('LoadState') != 'loaded':
+        return 'ERROR', 'Service is not installed'
+    active = p.get('ActiveState')
+    if active == 'failed' or p.get('Result') not in (None, '', 'success'):
+        return 'ERROR', 'Service failed; inspect journalctl --user -u rp-ai.service'
+    if active in ('inactive', 'deactivating'):
+        return 'OFF', 'Inference server stopped' if active == 'inactive' else 'Inference server stopping'
+    if active not in ('active', 'activating'):
+        return 'ERROR', f'Unexpected service state: {active}'
+    if owned and code == 200 and body.get('status') == 'ok':
+        return 'READY', 'Service owns the listener and /health reports ok'
+    if code is not None and not owned:
+        return 'ERROR', 'Another process owns the configured endpoint'
+    if owned and code not in (None, 200, 503):
+        return 'ERROR', f'Health endpoint returned HTTP {code}'
+    if owned and code == 200:
+        return 'ERROR', 'Health response is not status ok'
+    if elapsed >= timeout:
+        return 'ERROR', 'Readiness timeout; server remains running for inspection'
+    return 'STARTING', 'Waiting for model readiness'
+
+
+def status():
+    try:
+        c = config()
+        p = properties()
+        code, body, owned = None, {}, False
+        if p.get('ActiveState') in ('active', 'activating'):
+            pid = int(p.get('MainPID', 0))
+            if pid:
+                owned = owns_listener(pid, c['port'])
+            code, body = probe(c['port'])
+        # Re-read after HTTP request: a stop/restart may have happened meanwhile.
+        latest = properties()
+        if latest.get('MainPID') != p.get('MainPID') or latest.get('ActiveState') != p.get('ActiveState'):
+            p, code, body, owned = latest, None, {}, False
+        entered = int(p.get('ActiveEnterTimestampMonotonic') or 0) / 1e6
+        elapsed = max(0, time.monotonic() - entered) if entered else 0
+        state, detail = classify(p, code, body, owned, elapsed, c['startup_timeout'])
+        return {'state': state, 'detail': detail, 'pid': int(p.get('MainPID', 0)), 'port': c['port']}
+    except Exception as e:
+        return {'state': 'ERROR', 'detail': str(e), 'pid': 0}
+
+
+def run():
+    c = config()
+    binary, model = Path(c['binary']), Path(c['model'])
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        raise ValueError(f'Executable missing: {binary}')
+    if not model.is_file():
+        raise ValueError(f'Model missing: {model}')
+    runtime = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'))
+    lock = os.open(runtime / 'rp-ai-server.lock', os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.set_inheritable(lock, True)  # held by llama-server through exec
+    for entry in Path('/proc').iterdir():
+        if not entry.name.isdigit() or int(entry.name) == os.getpid():
+            continue
+        try:
+            exe = (entry / 'exe').resolve(strict=True)
+            if exe == binary.resolve() or exe.name == 'llama-server':
+                raise RuntimeError(f'Existing inference server PID {entry.name}; stop it before RP AI ON')
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+    with socket.socket() as s:
+        s.bind(('127.0.0.1', c['port']))
+    argv = [str(binary), '--model', str(model), '--host', '127.0.0.1', '--port', str(c['port']), *c.get('args', [])]
+    os.execv(str(binary), argv)
+
+
+def control(action):
+    runtime = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}'))
+    with (runtime / 'rp-ai-control.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if action == 'toggle':
+            p = properties()
+            action = 'off' if p.get('ActiveState') in ('active', 'activating', 'deactivating') else 'on'
+        if action == 'on':
+            config()
+            systemctl('reset-failed', UNIT, check=False)
+            systemctl('start', '--no-block', UNIT)
+        else:
+            systemctl('stop', UNIT)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('action', choices=['on', 'off', 'toggle', 'status', 'run'])
+    ap.add_argument('--json', action='store_true')
+    a = ap.parse_args()
+    try:
+        if a.action == 'status':
+            result = status()
+            print(json.dumps(result) if a.json else result['state'] + ': ' + result['detail'])
+        elif a.action == 'run':
+            run()
+        else:
+            control(a.action)
+    except Exception as e:
+        print(f'RP AI: {e}', file=sys.stderr)
+        if a.action != 'run' and shutil.which('notify-send'):
+            subprocess.run(['notify-send', 'RP AI', str(e)], check=False)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

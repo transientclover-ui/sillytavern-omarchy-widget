@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "local.rp-ai",
+  "name": "RP AI",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Actual local llama.cpp service readiness; SillyTavern independent",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "BarWidget.qml"},
+  "barWidget": {"displayName": "RP AI", "description": "OFF / STARTING / READY / ERROR", "category": "System", "allowMultiple": false, "defaultSection": "right"}
+}

@@ -1,0 +1,8 @@
+{
+  "binary": "/path/to/llama.cpp/build/bin/llama-server",
+  "model": "/path/to/model.gguf",
+  "host": "127.0.0.1",
+  "port": 8080,
+  "startup_timeout": 300,
+  "args": ["--ctx-size", "8192", "--n-gpu-layers", "99"]
+}
